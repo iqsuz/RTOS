@@ -8,7 +8,7 @@
 
 #define NUM_THREADS 128 //Number of threads
 
-void *sumIdx(void *threadp);    //Function prototype
+void *sumOfIdx(void *threadp);    //Function prototype
 
 typedef struct      //Thread input struct decleration.
 {
