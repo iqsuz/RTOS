@@ -6,50 +6,38 @@
 #include <syslog.h>
 #include <sys/time.h>
 
-#define NUM_THREADS 128
+#define NUM_THREADS 128 //Number of threads
 
-void *sumIdx(void *threadp);
+void *sumIdx(void *threadp);    //Function prototype
 
-typedef struct
+typedef struct      //Thread input struct decleration.
 {
     int threadIdx;
 }threadParams_t;
 
-pthread_t threads[NUM_THREADS];
-threadParams_t threadParams[NUM_THREADS];
-
-void *sumOfIdx(void *threadp)
-{
-    threadParams_t *iThreadp = (threadParams_t *)threadp;
-    int sum = (iThreadp->threadIdx * (iThreadp->threadIdx + 1)) / 2;
-    
-    syslog(LOG_INFO, "Thread idx=%d, sum[1...%d]=%d", 
-                    iThreadp->threadIdx, 
-                    iThreadp->threadIdx,
-                    sum
-                    );  
-}
-
+pthread_t threads[NUM_THREADS];     //Thread handler.
+threadParams_t threadParams[NUM_THREADS];      //Thread input struct defination.
 
 int main(int argc, char *argv[])
 {
-    FILE *pipe;
-    char unameMsg[250];
+    FILE *pipe;     //uname pipe file.
+    char unameMsg[250];     //string for uname result.
 
-    openlog("[COURSE:1][ASSIGNMENT:2]", LOG_NDELAY, LOG_USER);
+    openlog("[COURSE:1][ASSIGNMENT:2]", LOG_NDELAY, LOG_USER);  //open syslog with assigned header.
 
-    pipe = popen("uname -a", "r");
+    pipe = popen("uname -a", "r");     //run bash code.
 
     if(pipe)
     {
-        fgets(unameMsg, sizeof(unameMsg), pipe);
-        syslog(LOG_INFO, "%s", unameMsg);
+        fgets(unameMsg, sizeof(unameMsg), pipe);    //get the string.
+        syslog(LOG_INFO, "%s", unameMsg);   //log it.
     }
 
     for(int i = 0; i < NUM_THREADS; i++)
     {
-        threadParams[i].threadIdx = i;
+        threadParams[i].threadIdx = i;  //Assign thread id to its input param.
 
+        //create thread with following parameters.
         pthread_create(&threads[i],
                         (void *)0,
                         sumOfIdx,
@@ -57,10 +45,22 @@ int main(int argc, char *argv[])
                         );
     }
 
-    for(int i = 0; i < NUM_THREADS; i++)
+    for(int i = 0; i < NUM_THREADS; i++)    //Run threads.
     {
         pthread_join(threads[i] ,NULL);
     }
 
-    closelog();
+    closelog();     //close syslog file.
+}
+
+void *sumOfIdx(void *threadp)
+{
+    threadParams_t *iThreadp = (threadParams_t *)threadp;       //Type casting for input param.
+    int sum = (iThreadp->threadIdx * (iThreadp->threadIdx + 1)) / 2;        //Calculate the summation.
+    
+    syslog(LOG_INFO, "Thread idx=%d, sum[1...%d]=%d", //log it.
+                    iThreadp->threadIdx, 
+                    iThreadp->threadIdx,
+                    sum
+                    );  
 }
