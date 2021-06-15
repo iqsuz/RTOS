@@ -24,4 +24,4 @@ pthread: pthread.o
 depend:
 
 .c.o:
-	$(CC) $(CFLAGS) -c $<
+	$(CC) -g $(CFLAGS) -c $<

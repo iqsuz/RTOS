@@ -54,7 +54,7 @@ int main(int argc, char *argv[])
     rt_param.sched_priority = sched_get_priority_max(SCHED_FIFO);   //Set thread priority as MAX.
 
     pthread_attr_setschedparam(&rt_sched_attr, &rt_param);      //Set the scheduler policy.
-    sched_setscheduler(getpid(), SCHED_FIFO, &rt_param);
+    //sched_setscheduler(getpid(), SCHED_FIFO, &rt_param);
 
     printf("ADJUSTED: ");
     print_scheduler();
@@ -79,9 +79,13 @@ void print_scheduler(void)
 {
     int schedType;
 
-    schedType = sched_getscheduler(getpid());   //Which scheduler policy on duty?
+    int self_sched_pol;
+    struct sched_param self_sched_param;
 
-    switch(schedType)
+    //schedType = sched_getscheduler(getpid());   //Which scheduler policy on duty?
+    pthread_getschedparam(pthread_self(), &self_sched_pol, &self_sched_param);
+
+    switch(self_sched_pol)
     {
         case SCHED_OTHER:
             printf("Thread scheduler policy is SCHED_OTHER.\n");
@@ -102,12 +106,15 @@ void print_scheduler(void)
 
 }
 
+
 void *sumOfIdx(void *threadp)
 {
     threadParams_t *threadParam = (threadParams_t *)threadp;    //Type casting since it is passed as void *.
     int sum = threadParam->threadIdx * (threadParam->threadIdx + 1) / 2;    //Summation with Gauss formula.
 
-    syslog(LOG_INFO ,"Thread idx=%d, sum[1...%d]=%d Running on core: %d\n", //log it.
+    print_scheduler();
+
+    printf("Thread idx=%d, sum[1...%d]=%d Running on core: %d\n", //log it.
                     threadParam->threadIdx,
                     threadParam->threadIdx,
                     sum,
