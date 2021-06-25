@@ -1,73 +1,69 @@
-#define _GNU_SOURCE
-#include <pthread.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <sched.h>
-#include <time.h>
-#include <sys/sysinfo.h>
-#include <sys/types.h>
-#include <unistd.h>
+/****************************************************************************/
+/* Function: nanosleep and POSIX 1003.1b RT clock demonstration             */
+/*                                                                          */
+/* Sam Siewert - 02/05/2011                                                 */
+/*                                                                          */
+/****************************************************************************/
 
-#define NUM_THREADS (4)
-#define NUM_CPUS (4)
+#include <pthread.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <errno.h>
 
 #define NSEC_PER_SEC (1000000000)
 #define NSEC_PER_MSEC (1000000)
-#define NSEC_PER_MICROSEC (1000)
-#define DELAY_TICKS (1)
+#define NSEC_PER_USEC (1000)
 #define ERROR (-1)
 #define OK (0)
+#define TEST_SECONDS (0)
+#define TEST_NANOSECONDS (NSEC_PER_MSEC * 10)
 
-//#define MY_SCHEDULER SCHED_FIFO
-//#define MY_SCHEDULER SCHED_RR
-#define MY_SCHEDULER SCHED_OTHER
+void end_delay_test(void);
 
-int numberOfProcessors=NUM_CPUS;
+static struct timespec sleep_time = {0, 0};
+static struct timespec sleep_requested = {0, 0};
+static struct timespec remaining_time = {0, 0};
 
-unsigned int idx = 0, jdx = 1;
-unsigned int seqIterations = 47;
-unsigned int reqIterations = 10000000;
-volatile unsigned int fib = 0, fib0 = 0, fib1 = 1;
+static unsigned int sleep_count = 0;
 
-void print_scheduler(void);
+pthread_t main_thread;
+pthread_attr_t main_sched_attr;
+int rt_max_prio, rt_min_prio, min;
+struct sched_param main_param;
 
-int FIB_TEST(unsigned int seqCnt, unsigned int iterCnt)
+
+void print_scheduler(void)
 {
-   for(idx=0; idx < iterCnt; idx++)
+   int schedType;
+
+   schedType = sched_getscheduler(getpid());  //Get scheduler of current process..
+
+   switch(schedType)  //Print it out according to its return value.
    {
-      fib = fib0 + fib1;
-      while(jdx < seqCnt)
-      { 
-         fib0 = fib1;
-         fib1 = fib;
-         fib = fib0 + fib1;
-         jdx++;
-      }
-
-      jdx=0;
+     case SCHED_FIFO:
+           printf("Pthread Policy is SCHED_FIFO\n");
+           break;
+     case SCHED_OTHER:
+           printf("Pthread Policy is SCHED_OTHER\n");
+       break;
+     case SCHED_RR:
+           printf("Pthread Policy is SCHED_RR\n");
+           break;
+     default:
+       printf("Pthread Policy is UNKNOWN\n");
    }
-
-   return idx;
 }
 
 
-
-typedef struct
+double d_ftime(struct timespec *fstart, struct timespec *fstop)
 {
-    int threadIdx;
-} threadParams_t;
+  double dfstart = ((double)(fstart->tv_sec) + ((double)(fstart->tv_nsec) / 1000000000.0));
+  double dfstop = ((double)(fstop->tv_sec) + ((double)(fstop->tv_nsec) / 1000000000.0));
 
-
-// POSIX thread declarations and scheduling attributes
-//
-pthread_t threads[NUM_THREADS];
-threadParams_t threadParams[NUM_THREADS];
-pthread_attr_t rt_sched_attr[NUM_THREADS];
-int rt_max_prio, rt_min_prio;
-struct sched_param rt_param[NUM_THREADS];
-struct sched_param main_param;
-pthread_attr_t main_attr;
-pid_t mainpid;
+  return(dfstop - dfstart); 
+}
 
 
 int delta_t(struct timespec *stop, struct timespec *start, struct timespec *delta_t)
@@ -133,145 +129,151 @@ int delta_t(struct timespec *stop, struct timespec *start, struct timespec *delt
   return(OK);
 }
 
-#define SUM_ITERATIONS (1000)
+static struct timespec rtclk_dt = {0, 0};
+static struct timespec rtclk_start_time = {0, 0};
+static struct timespec rtclk_stop_time = {0, 0};
+static struct timespec delay_error = {0, 0};
 
-void *workerThread(void *threadp)
+//#define MY_CLOCK CLOCK_REALTIME
+//#define MY_CLOCK CLOCK_MONOTONIC
+#define MY_CLOCK CLOCK_MONOTONIC
+//#define MY_CLOCK CLOCK_REALTIME_COARSE
+//#define MY_CLOCK CLOCK_MONOTONIC_COARSE
+
+#define TEST_ITERATIONS (100)
+
+/*
+This is a function of main_thread.
+*/
+void *delay_test(void *threadID)
 {
-    int sum=0, i;
-    pthread_t thread;
-    cpu_set_t cpuset;
-    struct timespec start_time = {0, 0};
-    struct timespec finish_time = {0, 0};
-    struct timespec thread_dt = {0, 0};
-    threadParams_t *threadParams = (threadParams_t *)threadp;
+  int idx, rc;
+  unsigned int max_sleep_calls=3;
+  int flags = 0;
+  struct timespec rtclk_resolution;
 
-    print_scheduler();
-    clock_gettime(CLOCK_REALTIME, &start_time);
-    // COMPUTE SECTION
-    for(i=1; i < ((threadParams->threadIdx)+1*SUM_ITERATIONS); i++)
-        sum=sum+i;
+  sleep_count = 0;
 
-    FIB_TEST(seqIterations, reqIterations);
-    // END COMPUTE SECTION
-    clock_gettime(CLOCK_REALTIME, &finish_time);
+  if(clock_getres(MY_CLOCK, &rtclk_resolution) == ERROR)    //Get resolution of CLOCK_MONOTONIC_RAW
+  {
+      perror("clock_getres");
+      exit(-1);
+  }
+  else
+  {
+      printf("\n\nPOSIX Clock demo using system RT clock with resolution:\n\t%ld secs, %ld microsecs, %ld nanosecs\n", rtclk_resolution.tv_sec, (rtclk_resolution.tv_nsec/1000), rtclk_resolution.tv_nsec);
+  }
 
+  for(idx=0; idx < TEST_ITERATIONS; idx++)
+  {
+      printf("test %d\n", idx);
 
+      /* run test for defined seconds */
+      sleep_time.tv_sec=TEST_SECONDS;
+      sleep_time.tv_nsec=TEST_NANOSECONDS;
+      sleep_requested.tv_sec=sleep_time.tv_sec;
+      sleep_requested.tv_nsec=sleep_time.tv_nsec;
 
-    //printf("\nThread idx=%d, sum[0...%d]=%d\n", 
-    //       threadParams->threadIdx,
-    //       (threadParams->threadIdx+1)*SUM_ITERATIONS, sum);
+      /* start time stamp */ 
+      clock_gettime(MY_CLOCK, &rtclk_start_time);
 
-    delta_t(&finish_time, &start_time, &thread_dt);
+      /* request sleep time and repeat if time remains */
+      do 
+      {
+          if(rc=nanosleep(&sleep_time, &remaining_time) == 0) break;  //Break loop if time elapsed.
+         
+          sleep_time.tv_sec = remaining_time.tv_sec;  //
+          sleep_time.tv_nsec = remaining_time.tv_nsec;
+          sleep_count++;
+      } 
+      while (((remaining_time.tv_sec > 0) || (remaining_time.tv_nsec > 0))
+		      && (sleep_count < max_sleep_calls));
 
-    printf("\nThread idx=%d ran %ld sec, %ld msec (%ld microsec, %ld nsec) on core=%d\n",
-	   threadParams->threadIdx, thread_dt.tv_sec, (thread_dt.tv_nsec / NSEC_PER_MSEC),
-	   (thread_dt.tv_nsec / NSEC_PER_MICROSEC), thread_dt.tv_nsec, sched_getcpu());
+      clock_gettime(MY_CLOCK, &rtclk_stop_time);
 
-    pthread_exit(&sum);
+      delta_t(&rtclk_stop_time, &rtclk_start_time, &rtclk_dt);
+      delta_t(&rtclk_dt, &sleep_requested, &delay_error);
+
+      end_delay_test();
+  }
+
 }
 
-
-void print_scheduler(void)
+void end_delay_test(void)
 {
-   int schedType, scope;
+    double real_dt;
+#if 0
+  printf("MY_CLOCK start seconds = %ld, nanoseconds = %ld\n", 
+         rtclk_start_time.tv_sec, rtclk_start_time.tv_nsec);
+  
+  printf("MY_CLOCK clock stop seconds = %ld, nanoseconds = %ld\n", 
+         rtclk_stop_time.tv_sec, rtclk_stop_time.tv_nsec);
+#endif
 
-   schedType = sched_getscheduler(getpid());
+  real_dt=d_ftime(&rtclk_start_time, &rtclk_stop_time);
+  printf("MY_CLOCK clock DT seconds = %ld, msec=%ld, usec=%ld, nsec=%ld, sec=%6.9lf\n", 
+         rtclk_dt.tv_sec, rtclk_dt.tv_nsec/1000000, rtclk_dt.tv_nsec/1000, rtclk_dt.tv_nsec, real_dt);
 
-   switch(schedType)
-   {
-     case SCHED_FIFO:
-           printf("Pthread Policy is SCHED_FIFO\n");
-           break;
-     case SCHED_OTHER:
-           printf("Pthread Policy is SCHED_OTHER\n");
-       break;
-     case SCHED_RR:
-           printf("Pthread Policy is SCHED_RR\n");
-           break;
-     default:
-       printf("Pthread Policy is UNKNOWN\n");
-   }
+#if 0
+  printf("Requested sleep seconds = %ld, nanoseconds = %ld\n", 
+         sleep_requested.tv_sec, sleep_requested.tv_nsec);
 
-   pthread_attr_getscope(&main_attr, &scope);
-
-   if(scope == PTHREAD_SCOPE_SYSTEM)
-     printf("PTHREAD SCOPE SYSTEM\n");
-   else if (scope == PTHREAD_SCOPE_PROCESS)
-     printf("PTHREAD SCOPE PROCESS\n");
-   else
-     printf("PTHREAD SCOPE UNKNOWN\n");
-
+  printf("\n");
+  printf("Sleep loop count = %ld\n", sleep_count);
+#endif
+  printf("MY_CLOCK delay error = %ld, nanoseconds = %ld\n", 
+         delay_error.tv_sec, delay_error.tv_nsec);
 }
 
+#define RUN_RT_THREAD
 
-
-int main (int argc, char *argv[])
+void main(void)
 {
-   int rc, idx;
-   int i;
-   cpu_set_t threadcpu;
-   int coreid;
+   int rc, scope;
 
-   numberOfProcessors = get_nprocs_conf();
+   printf("Before adjustments to scheduling policy:\n");
+   print_scheduler(); //Print scheduler before adjustment.
 
-   printf("This system has %d processors with %d available\n", numberOfProcessors, get_nprocs());
-   printf("The test thread created will be run on a specific core based on thread index\n");
+#ifdef RUN_RT_THREAD
+   pthread_attr_init(&main_sched_attr);   //Initiate 
+   pthread_attr_setinheritsched(&main_sched_attr, PTHREAD_EXPLICIT_SCHED);  //Do not inherit scheduler policy from parent.
+   pthread_attr_setschedpolicy(&main_sched_attr, SCHED_FIFO); //Set sched policy as SCHED_FIFO
 
-   mainpid=getpid();
+   rt_max_prio = sched_get_priority_max(SCHED_FIFO);  //Get max priority of SCHED_FIFO
+   rt_min_prio = sched_get_priority_min(SCHED_FIFO);  //Get min priority of SCHED_FIFO
 
-   rt_max_prio = sched_get_priority_max(SCHED_FIFO);
-   rt_min_prio = sched_get_priority_min(SCHED_FIFO);
+   main_param.sched_priority = rt_max_prio; //Change priority of main_param struct to max.
+   rc=sched_setscheduler(getpid(), SCHED_FIFO, &main_param);  //Change scheduler policy to SCHED_FIFO with highest priority.
 
-   print_scheduler();
-   rc=sched_getparam(mainpid, &main_param);
-   main_param.sched_priority=rt_max_prio;
 
-   if(MY_SCHEDULER != SCHED_OTHER)
+   if (rc)  //throw an error if not succeed.
    {
-       if(rc=sched_setscheduler(getpid(), MY_SCHEDULER, &main_param) < 0)
-	       perror("******** WARNING: sched_setscheduler");
+       printf("ERROR; sched_setscheduler rc is %d\n", rc);
+       perror("sched_setschduler"); exit(-1);
    }
 
+   printf("After adjustments to scheduling policy:\n"); //Print adjusted scheduler policy.
    print_scheduler();
 
+   main_param.sched_priority = rt_max_prio;
+   pthread_attr_setschedparam(&main_sched_attr, &main_param);   //Assign main_param to main_sched_attr.
 
-   printf("rt_max_prio=%d\n", rt_max_prio);
-   printf("rt_min_prio=%d\n", rt_min_prio);
+   rc = pthread_create(&main_thread, &main_sched_attr, delay_test, (void *)0);  //Create thread that call delay_test function.
 
-
-
-
-
-   for(i=0; i < NUM_THREADS; i++)
+   if (rc)  //If thread creation is not successful throw an error.
    {
-       CPU_ZERO(&threadcpu);
-
-       coreid=i%numberOfProcessors;
-       printf("Setting thread %d to core %d\n", i, coreid);
-
-       CPU_SET(coreid, &threadcpu);
-
-       rc=pthread_attr_init(&rt_sched_attr[i]);
-       rc=pthread_attr_setinheritsched(&rt_sched_attr[i], PTHREAD_EXPLICIT_SCHED);
-       rc=pthread_attr_setschedpolicy(&rt_sched_attr[i], MY_SCHEDULER);
-       rc=pthread_attr_setaffinity_np(&rt_sched_attr[i], sizeof(cpu_set_t), &threadcpu);
-
-       rt_param[i].sched_priority=rt_max_prio-i-1;
-       pthread_attr_setschedparam(&rt_sched_attr[i], &rt_param[i]);
-
-       threadParams[i].threadIdx=i;
-
-       pthread_create(&threads[i],               // pointer to thread descriptor
-                      &rt_sched_attr[i],         // use AFFINITY AND SCHEDULER attributes
-                      workerThread,              // thread function entry point
-                      (void *)&(threadParams[i]) // parameters to pass in
-                     );
-
+       printf("ERROR; pthread_create() rc is %d\n", rc);
+       perror("pthread_create");
+       exit(-1);
    }
 
+   pthread_join(main_thread, NULL); //Wait untill main_thread executed.
 
-   for(i=0;i<NUM_THREADS;i++)
-       pthread_join(threads[i], NULL);
+   if(pthread_attr_destroy(&main_sched_attr) != 0)
+     perror("attr destroy");
+#else
+   delay_test((void *)0);
+#endif
 
-   printf("\nTEST COMPLETE\n");
+   printf("TEST COMPLETE\n");
 }
